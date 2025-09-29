@@ -64,14 +64,14 @@
 <body>
   <div class="player" id="player">
     <div class="cover" id="cover">
-      <img id="coverImg" alt="Обложка" referrerpolicy="no-referrer" decoding="async"
+      <img id="coverImg" alt="Обложка" decoding="async" src="nostalgielogo.jpeg"
         style="height:100%;width:auto;display:block;background:#0a0b11" />
       <div class="brand-watermark-cover">Nostalgie Махачкала</div>
     </div>
     <div class="right">
       <div class="meta">
         <h1 class="title" id="title">Загрузка…</h1>
-        <p class="artist" id="artist">—</p>
+        <p class="artist" id="artist">—</p>St
       </div>
       <div class="controls">
         <button class="btn" id="playBtn" aria-label="Воспроизвести">
@@ -106,7 +106,8 @@
       fastMs: Number(params.get('fastMs') || 2000),
       refreshMs: Number(params.get('refreshMs') || 10000),
       // if empty, we'll auto-fallback to a public proxy (allorigins)
-      proxy: params.get('proxy') || ''
+      proxy: params.get('proxy') || '',
+      appleProxy: params.get('appleProxy') || ''
     }
     const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent)
 
@@ -218,22 +219,29 @@
     }
 
     async function updateMeta(){
+      console.log('[DEBUG] updateMeta called')
       // no visible ticker in production
       let parsed = null
       let lastVia = ''
 
       for (const ep of cfg.metaEndpoints){
+        console.log('[DEBUG] Fetching metadata from:', ep)
         try{
           const {res, via} = await smartGet(proxied(ep))
           lastVia = via
+          console.log('[DEBUG] Fetch successful via:', via, 'status:', res.status)
           if (!res.ok) throw new Error('HTTP '+res.status)
           const ct = (res.headers.get('content-type') || '').toLowerCase()
+          console.log('[DEBUG] Content-Type:', ct)
           if (ct.includes('application/json')){
             const json = await res.json()
+            console.log('[DEBUG] JSON response:', json)
             const raw = extractTitleFromJson(json)
+            console.log('[DEBUG] Extracted title:', raw)
             parsed = splitTitle(typeof raw === 'string' ? raw : '')
           } else {
             const text = await res.text()
+            console.log('[DEBUG] Text response:', text.substring(0, 200) + '...')
             // attempt JSON first
             try {
               const j = JSON.parse(text)
@@ -246,18 +254,24 @@
               parsed = splitTitle(line)
             }
           }
+          console.log('[DEBUG] Parsed metadata:', parsed)
           if (parsed && (parsed.title || parsed.artist)) break
-        }catch(e){ console.warn('Meta fetch failed for', ep, e) }
+        } catch (e) {
+          console.warn('[DEBUG] Meta fetch failed for', ep, e)
+        }
       }
 
       if (!parsed){
+        console.log('[DEBUG] No metadata parsed, scheduling next update')
         // Ensure we continue polling even if a cycle yielded no parseable metadata
         scheduleNext(cfg.refreshMs)
         return
       }
       const key = `${parsed.artist}—${parsed.title}`
+      console.log('[DEBUG] Song key:', key, 'lastSongKey:', lastSongKey)
       let changed = false
       if (key !== lastSongKey){
+        console.log('[DEBUG] Song changed! Updating UI and cover')
         lastSongKey = key
         titleEl.textContent = parsed.title
         artistEl.textContent = parsed.artist
@@ -270,7 +284,9 @@
         const curSrcAttr = imgEl ? (imgEl.getAttribute('src') || '') : ''
         const looksDefault = !curSrcAttr || curSrcAttr.indexOf(cfg.defaultCover) !== -1
         const stale = Date.now() - lastCoverAttemptTs > 3000
+        console.log('[DEBUG] Song unchanged. Current src:', curSrcAttr, 'looksDefault:', looksDefault, 'stale:', stale)
         if (cfg.autoCover && looksDefault && stale) {
+          console.log('[DEBUG] Retrying cover lookup for same song')
           lastCoverAttemptKey = lastSongKey
           lastCoverAttemptTs = Date.now()
           await setCover(parsed)
@@ -282,27 +298,32 @@
       } else {
         scheduleNext(!audio.paused ? cfg.fastMs : cfg.refreshMs)
       }
-      // metadata OK (silent)
+      console.log('[DEBUG] updateMeta completed, next update in:', changed ? 1500 : (!audio.paused ? cfg.fastMs : cfg.refreshMs), 'ms')
     }
 
     async function setCover({artist, title}){
+      console.log('[DEBUG] setCover called with artist:', artist, 'title:', title)
       lastCoverAttemptKey = lastSongKey
       lastCoverAttemptTs = Date.now()
       // Prefer dynamic template if available
       if (cfg.coverTpl){
+        console.log('[DEBUG] Using coverTpl:', cfg.coverTpl)
         const url = cfg.coverTpl.replaceAll('{artist}', encodeURIComponent(artist)).replaceAll('{title}', encodeURIComponent(title))
         return paintCover(url)
       }
       // Provider template comes before static provider cover if present
       if (cfg.providerCoverTpl){
+        console.log('[DEBUG] Using providerCoverTpl:', cfg.providerCoverTpl)
         const url = cfg.providerCoverTpl.replaceAll('{artist}', encodeURIComponent(artist)).replaceAll('{title}', encodeURIComponent(title))
         return paintCover(url)
       }
       // Try explicit provider cover first (e.g., 101.ru image URL)
       if (cfg.providerCover){
+        console.log('[DEBUG] Using providerCover:', cfg.providerCover)
         return paintCover(cfg.providerCover)
       }
       if (cfg.cover){
+        console.log('[DEBUG] Using cover endpoint:', cfg.cover)
         // rcast artwork endpoint returns a text body containing the actual image URL.
         // If it's already an image URL, paint it directly; otherwise resolve via smartGet.
         const looksLikeImage = /\.(jpg|jpeg|png|webp|gif)(\?.*)?$/i.test(cfg.cover)
@@ -310,12 +331,23 @@
         return resolveAndPaintCoverFromEndpoint(cfg.cover)
       }
       if (cfg.autoCover){
+        console.log('[DEBUG] Trying autoCover with Apple iTunes')
         // Simplified strategy: always try Apple first (more accurate artwork).
         // Regional blocks are handled by retry + size candidates and default fallback.
         const found = await tryAppleCover(artist, title)
+        console.log('[DEBUG] Apple cover result:', found)
         if (found) return paintCover(found)
+
+        // iOS fallback: try Deezer if Apple fails
+        if (isIOS) {
+          console.log('[DEBUG] iOS Apple failed, trying Deezer fallback')
+          const deezerCover = await tryDeezerCover(artist, title)
+          console.log('[DEBUG] Deezer cover result:', deezerCover)
+          if (deezerCover) return paintCover(deezerCover)
+        }
       }
       // fallback visual
+      console.log('[DEBUG] Falling back to default cover')
       const imgEl = document.getElementById('coverImg');
       if (imgEl){ imgEl.src = cfg.defaultCover }
     }
@@ -342,16 +374,73 @@
         const term1 = normalizeQuery(`${artist} ${title}`)
         const term2 = normalizeQuery(`${title} ${artist}`)
         if (!term1) return ''
+        // Prefer global endpoints first to avoid RU redirect to musics.mzstoreservices
         const bases = [
-          `https://itunes.apple.com/search?term=${encodeURIComponent(term1)}&media=music&entity=song&country=ru&limit=1&_=${Date.now()}`,
-          `https://itunes.apple.com/search?term=${encodeURIComponent(term2)}&media=music&entity=song&country=ru&limit=1&_=${Date.now()}`,
+          `https://itunes.apple.com/search?term=${encodeURIComponent(term1)}&media=music&entity=song&limit=1&_=${Date.now()}`,
+          `https://itunes.apple.com/search?term=${encodeURIComponent(term2)}&media=music&entity=song&limit=1&_=${Date.now()}`,
           `https://itunes.apple.com/search?term=${encodeURIComponent(term1)}&media=music&entity=album&limit=1&_=${Date.now()}`,
-          `https://itunes.apple.com/search?term=${encodeURIComponent(term1)}&media=music&entity=song&limit=1&_=${Date.now()}`
+          `https://itunes.apple.com/search?term=${encodeURIComponent(term1)}&media=music&entity=song&country=ru&limit=1&_=${Date.now()}`
         ]
+
+        const fetchAppleJson = async (url) => {
+          // On file:// protocol or iOS, always use proxy to avoid musics:// redirect
+          if (isIOS || location.protocol === 'file:') {
+            console.log('[DEBUG] Using proxy for Apple API (iOS or file:// protocol)')
+            try {
+              const prox = 'https://r.jina.ai/http://' + url.replace(/^https?:\/\//, '')
+              console.log('[DEBUG] iOS proxy URL:', prox)
+              const rp = await fetchWithTimeout(prox, 10000)
+              if (!rp.ok) {
+                console.log('[DEBUG] iOS proxy failed with status:', rp.status)
+                return null
+              }
+              const text = await rp.text()
+              console.log('[DEBUG] iOS proxy response:', text.substring(0, 200) + '...')
+
+              // Extract JSON from jina's Markdown wrapper
+              const jsonMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/) || text.match(/\{[\s\S]*\}/)
+              const jsonText = jsonMatch ? jsonMatch[1] || jsonMatch[0] : text
+
+              try {
+                return JSON.parse(jsonText.trim())
+              } catch (e) {
+                console.log('[DEBUG] iOS proxy JSON parse failed:', e)
+                console.log('[DEBUG] Trying to parse raw text as JSON...')
+                try {
+                  return JSON.parse(text.trim())
+                } catch (e2) {
+                  console.log('[DEBUG] Raw text parse also failed:', e2)
+                  return null
+                }
+              }
+            } catch (e) {
+              console.log('[DEBUG] iOS proxy request failed:', e)
+              return null
+            }
+          }
+
+          try {
+            const r = await fetchWithTimeout(url, 7000)
+            if (r.ok) return await r.json()
+          } catch (_) { /* fallthrough */ }
+          // file:// origin or blocked CORS — optional proxy fallback
+          if (cfg.appleProxy) {
+            try {
+              const prox = cfg.appleProxy.includes('r.jina.ai')
+                ? cfg.appleProxy + url.replace(/^https?:\/\//, '')
+                : cfg.appleProxy + encodeURIComponent(url)
+              const rp = await fetchWithTimeout(prox, 8000)
+              if (!rp.ok) return null
+              const text = await rp.text()
+              try { return JSON.parse(text) } catch { return null }
+            } catch (_) { return null }
+          }
+          return null
+        }
+
         for (const url of bases){
-          const r = await fetchWithTimeout(url, 7000)
-          if (!r.ok) continue
-          const j = await r.json()
+          const j = await fetchAppleJson(url)
+          if (!j) continue
           const it = j && Array.isArray(j.results) && j.results[0]
           const base = it && (it.artworkUrl100 || it.artworkUrl60 || it.artworkUrl30)
           if (typeof base === 'string' && base) return base
@@ -400,15 +489,24 @@
 
     async function paintCover(url){
       const imgEl = document.getElementById('coverImg')
-      if (!imgEl) return
-      // Always show default first, then swap to a real image when/if it loads.
-      if (!imgEl.getAttribute('src')) imgEl.src = cfg.defaultCover
+      if (!imgEl) {
+        console.error('[DEBUG] coverImg element not found!')
+        return
+      }
+      console.log('[DEBUG] paintCover called with:', url, 'isIOS:', isIOS)
+      console.log('[DEBUG] current img src:', imgEl.getAttribute('src'))
+
+      // Ensure default cover is always set first
+      if (!imgEl.getAttribute('src') || imgEl.getAttribute('src') === '') {
+        console.log('[DEBUG] Setting default cover:', cfg.defaultCover)
+        imgEl.src = cfg.defaultCover
+      }
 
       // Build candidate list (Apple sizes) if needed
       const list = Array.isArray(url) ? url : (url.includes('mzstatic.com') ? itunesCandidates(url) : [url])
 
       let i = 0
-      const perAttempt = isIOS ? 3500 : 5000
+      const perAttempt = isIOS ? 8000 : 5000
 
       function nextCandidate(){
         if (i >= list.length){
@@ -417,25 +515,44 @@
           return
         }
         const u = list[i++]
+        console.log('[DEBUG] Trying candidate', i, 'of', list.length, ':', u)
         const test = new Image()
-        test.referrerPolicy = 'no-referrer'
+        // Only set referrerPolicy for external URLs, not local files
+        if (!u.includes('nostalgielogo.jpeg') && !u.startsWith('file://')) {
+          test.referrerPolicy = 'no-referrer'
+        }
         test.decoding = 'async'
         const timer = setTimeout(() => {
           // Timeout hit — try next candidate
+          console.log('[DEBUG] Timeout for:', u)
           test.onload = test.onerror = null
+          // iOS-specific: ensure fallback on timeout
+          if (isIOS && i === list.length) {
+            console.log('[DEBUG] iOS: Last candidate timed out, setting default cover')
+            imgEl.src = cfg.defaultCover
+          }
           nextCandidate()
         }, perAttempt)
         test.onload = () => {
           clearTimeout(timer)
+          console.log('[DEBUG] Successfully loaded:', u)
           // On success, swap the visible image src to this candidate
           imgEl.src = u
+          console.log('[DEBUG] Set img src to:', u)
         }
         test.onerror = () => {
           clearTimeout(timer)
+          console.log('[DEBUG] Failed to load:', u)
+          // iOS-specific: ensure we always have a fallback image
+          if (isIOS && i === list.length) {
+            console.log('[DEBUG] iOS: Last candidate failed, setting default cover')
+            imgEl.src = cfg.defaultCover
+          }
           nextCandidate()
         }
         // Avoid cache-busting on iOS entirely; otherwise only for non-Apple images
         const finalUrl = (isIOS || u.includes('mzstatic.com')) ? u : withCacheBuster(u)
+        console.log('[DEBUG] Final URL:', finalUrl)
         test.src = finalUrl
       }
       nextCandidate()
@@ -485,10 +602,16 @@
     }
 
     // ---- boot ----
+    console.log('[DEBUG] App starting. iOS detected:', isIOS)
+    console.log('[DEBUG] Config:', cfg)
+
     // kick off cover resolution immediately if a cover endpoint was provided
     if (cfg.cover && !/\.(png|jpe?g|webp|gif)(\?.*)?$/i.test(cfg.cover)){
+      console.log('[DEBUG] Resolving cover from endpoint:', cfg.cover)
       resolveAndPaintCoverFromEndpoint(cfg.cover)
     }
+
+    console.log('[DEBUG] Starting metadata update')
     updateMeta()
 
     // ---- tiny tests (non-breaking, console only) ----
