@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Radio Nostalgie – Embed Player</title>
+  <style>
+    :root{
+      --bg:#0e0e12; --card:#151722; --muted:#8b90a5; --text:#eef1f7;
+      --accent:#ff4d6d; --accent-2:#ff7a59; --border:#232633;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Helvetica,Arial,sans-serif;
+      color:var(--text); background:var(--bg);
+      display:grid; place-items:center;
+    }
+    .player{
+      display:flex; align-items:stretch; gap:0; position:relative;
+      width:min(840px, 96vw); border:1px solid #2a2a2a; border-radius:8px; overflow:hidden;
+      background:#202224;
+      box-shadow:0 6px 18px rgba(0,0,0,.35);
+    }
+    .cover{
+      flex:0 0 180px; height:180px;
+      position:relative; overflow:hidden; display:flex; align-items:center; justify-content:center;
+      background:#0a0b11;
+    }
+    .cover img {
+      height: 100%;
+      width: auto;
+      object-fit: contain;
+      object-position: center bottom;
+      display: block;
+      background: #0a0b11;
+    }
+    .cover::after{ content:""; position:absolute; inset:0; background:linear-gradient(0deg,rgba(0,0,0,.25),rgba(0,0,0,0)) }
+
+    .right{ flex:1; display:flex; flex-direction:column; justify-content:center; min-height:160px; padding:12px 18px }
+    .meta{flex:0 0 auto; margin-bottom:8px}
+    .title{font-weight:700; font-size:26px; line-height:1.2; margin:0 0 4px}
+    .artist{margin:0; font-size:16px; color:#b9bed0}
+
+    .controls{display:flex; align-items:center; gap:12px; margin-top:6px}
+    .btn{appearance:none; border:none; cursor:pointer; display:inline-grid; place-items:center; width:64px;height:64px;border-radius:50%; background:#e35a1d; color:#fff}
+    .btn svg{width:20px;height:20px;fill:currentColor}
+
+    .range{flex:1; display:flex; align-items:center; gap:8px}
+    .range input[type="range"]{width:100%}
+    input[type="range"]{ -webkit-appearance:none; appearance:none; height:4px; border-radius:999px; background:#2b3044; outline:none }
+    input[type="range"]::-webkit-slider-thumb{ -webkit-appearance:none; appearance:none; width:14px; height:14px; border-radius:50%; background:var(--accent-2)}
+    input[type="range"]::-moz-range-thumb{ width:14px; height:14px; border:none; border-radius:50%; background:var(--accent-2) }
+
+    .ticker{ display:none }
+    .footer{ display:none }
+    .brand-watermark{ position:absolute; right:12px; bottom:8px; font-size:12px; color:#c9cedd; opacity:.92; letter-spacing:.2px; pointer-events:none; white-space:nowrap }
+    .brand-watermark-cover{ position:absolute; left:50%; transform:translateX(-50%); bottom:8px; font-size:11px; color:#c9cedd; opacity:.92; letter-spacing:.2px; pointer-events:none; white-space:nowrap; display:none }
+    @media (max-width: 560px){
+      .brand-watermark{ display:none }
+      .brand-watermark-cover{ display:block }
+    }
+  </style>
+</head>
+<body>
+  <div class="player" id="player">
+    <div class="cover" id="cover">
+      <img id="coverImg" alt="Обложка"
+        style="height:100%;width:auto;display:block;background:#0a0b11" />
+      <div class="brand-watermark-cover">Nostalgie Махачкала</div>
+    </div>
+    <div class="right">
+      <div class="meta">
+        <h1 class="title" id="title">Загрузка…</h1>
+        <p class="artist" id="artist">—</p>
+      </div>
+      <div class="controls">
+        <button class="btn" id="playBtn" aria-label="Воспроизвести">
+          <svg id="playIcon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        </button>
+        <div class="range">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M4 10v4h3l4 4V6L7 10H4zm13.5 2a4.5 4.5 0 0 0-2.25-3.9v7.8A4.5 4.5 0 0 0 17.5 12zm-2.25-7.32v2.06a7 7 0 0 1 0 10.52v2.06c3.05-1.27 5.2-4.28 5.2-7.64s-2.15-6.37-5.2-7.64z"/></svg>
+          <input id="volume" type="range" min="0" max="1" step="0.01" value="0.66" />
+        </div>
+      </div>
+
+    </div>
+    <div class="brand-watermark">Nostalgie Махачкала</div>
+  </div>
+
+  <audio id="audio" preload="none" crossorigin="anonymous"></audio>
+
+  <script>
+  ;(() => {
+    const params = new URLSearchParams(location.search)
+    const cfg = {
+      streamUrl: params.get('stream') || 'https://nostalgie.dagfm.ru/',
+      metaEndpoints: (params.get('meta') || 'https://status.rcast.net/71073')
+        .split(',').map(s => s.trim()).filter(Boolean),
+      // Prefer dynamic covers via coverTpl when provided; only use fixed cover if no template
+      cover: params.get('cover') || '',
+      coverTpl: params.get('coverTpl') || '',
+      providerCover: params.get('providerCover') || '',
+      providerCoverTpl: params.get('providerCoverTpl') || '',
+      defaultCover: params.get('defaultCover') || 'nostalgielogo.jpeg',
+      autoCover: params.get('autoCover') !== '0',
+      fastMs: Number(params.get('fastMs') || 2000),
+      refreshMs: Number(params.get('refreshMs') || 10000),
+      // if empty, we'll auto-fallback to a public proxy (allorigins)
+      proxy: params.get('proxy') || ''
+    }
+    const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent)
+
+    const audio = document.getElementById('audio')
+    const playBtn = document.getElementById('playBtn')
+    const playIcon = document.getElementById('playIcon')
+    const vol = document.getElementById('volume')
+    const titleEl = document.getElementById('title')
+    const artistEl = document.getElementById('artist')
+    const coverEl = document.getElementById('cover')
+    // ---- helpers (no status/ticker in production) ----
+    function setStatus(_msg){}
+    function setTicker(_msg){}
+
+    // ---- audio wiring ----
+    audio.src = cfg.streamUrl
+    audio.volume = parseFloat(vol.value)
+
+    playBtn.addEventListener('click', async () => {
+      if (audio.paused) {
+        // Optimistic UI: switch icon immediately
+        playIcon.innerHTML = '<path d="M6 6h4v12H6zM14 6h4v12h-4z"/>'
+        try {
+          await audio.play()
+          setStatus('проигрывается')
+        } catch (e) {
+          // revert if autoplay blocked / error
+          playIcon.innerHTML = '<path d="M8 5v14l11-7z"/>'
+          setStatus('нажмите воспроизвести')
+        }
+      } else {
+        // Switch icon first, then pause
+        playIcon.innerHTML = '<path d="M8 5v14l11-7z"/>'
+        audio.pause()
+        setStatus('пауза')
+      }
+    })
+
+    vol.addEventListener('input', () => audio.volume = parseFloat(vol.value))
+    // Nudge metadata refresh promptly on key UX events (helps iOS)
+    audio.addEventListener('playing', () => { try { updateMeta() } catch(_){} })
+    audio.addEventListener('pause',   () => { try { updateMeta() } catch(_){} })
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) { try { updateMeta() } catch(_){} }
+    })
+    // production: no status indicators
+
+    // ---- networking ----
+    let lastSongKey = ''
+
+    async function fetchWithTimeout(url, ms=7000, init={}){
+      const ctrl = new AbortController()
+      const id = setTimeout(() => ctrl.abort(), ms)
+      try { return await fetch(url, {signal: ctrl.signal, ...init}) }
+      finally { clearTimeout(id) }
+    }
+
+    function proxied(url){ return cfg.proxy ? `${cfg.proxy}${encodeURIComponent(url)}` : url }
+
+    async function smartGet(url){
+      // add cache-buster to avoid intermediates
+      const u = new URL(url, location.href)
+      u.searchParams.set('_', Date.now().toString())
+      // Force proxy when opened from file:// to avoid CORS/preflight issues
+      const mustProxy = location.protocol === 'file:'
+      if (mustProxy){
+        const base = cfg.proxy || 'https://r.jina.ai/http://'
+        const proxUrl = base.includes('r.jina.ai') ? base + u.toString().replace(/^https?:\/\//,'') : base + encodeURIComponent(u.toString())
+        const r = await fetchWithTimeout(proxUrl, 8000)
+        return {res:r, via: base.includes('r.jina.ai') ? 'jina' : 'proxy'}
+      }
+      // try direct first when not file://
+      try{
+        const r = await fetchWithTimeout(u.toString(), 7000)
+        if (r.ok) return {res:r, via:'direct'}
+        throw new Error('HTTP '+r.status)
+      }catch(e){
+        // on network/CORS errors, use proxy (explicit or public)
+        // Prefer r.jina.ai which avoids CORS preflight for GET
+        const base1 = cfg.proxy || 'https://r.jina.ai/http://'
+        const p1 = base1.includes('r.jina.ai') ? base1 + u.toString().replace(/^https?:\/\//,'') : base1 + encodeURIComponent(u.toString())
+        try{
+          const r1 = await fetchWithTimeout(p1, 8000)
+          return {res:r1, via: base1.includes('r.jina.ai') ? 'jina' : 'proxy'}
+        }catch(_){
+          const base2 = 'https://api.allorigins.win/raw?url='
+          const r2 = await fetchWithTimeout(base2 + encodeURIComponent(u.toString()), 8000)
+          return {res:r2, via:'allorigins'}
+        }
+      }
+    }
+
+    function splitTitle(s){
+      if (!s) return { title:'On Air', artist:'Radio Nostalgie' }
+      const parts = s.split(/\s[–-]\s/)
+      if (parts.length >= 2) return { artist: parts[0].trim(), title: parts.slice(1).join(' - ').trim() }
+      const p2 = s.split(/\s:\s/)
+      if (p2.length >= 2) return { artist: p2[0].trim(), title: p2.slice(1).join(': ').trim() }
+      return { title: s.trim(), artist: 'Radio Nostalgie' }
+    }
+
+    let metaTimerId = null
+    function scheduleNext(ms){
+      const delay = Math.max(1000, ms|0)
+      if (metaTimerId) clearTimeout(metaTimerId)
+      metaTimerId = setTimeout(updateMeta, delay)
+    }
+
+    async function updateMeta(){
+      // no visible ticker in production
+      let parsed = null
+      let lastVia = ''
+
+      for (const ep of cfg.metaEndpoints){
+        try{
+          const {res, via} = await smartGet(proxied(ep))
+          lastVia = via
+          if (!res.ok) throw new Error('HTTP '+res.status)
+          const ct = (res.headers.get('content-type') || '').toLowerCase()
+          if (ct.includes('application/json')){
+            const json = await res.json()
+            const raw = extractTitleFromJson(json)
+            parsed = splitTitle(typeof raw === 'string' ? raw : '')
+          } else {
+            const text = await res.text()
+            // attempt JSON first
+            try {
+              const j = JSON.parse(text)
+              const raw = extractTitleFromJson(j)
+              parsed = splitTitle(typeof raw === 'string' ? raw : '')
+            } catch(_) {
+              // RCast specific: prefer "Artist – Title" in any line
+              const mrc = text.match(/^(.*?)[\s\t]*[–-][\s\t]*(.+)$/m)
+              const line = (mrc ? `${mrc[1]} - ${mrc[2]}` : (text.split(/\n|\r/).find(l => /[-–:]/.test(l)) || text)).trim()
+              parsed = splitTitle(line)
+            }
+          }
+          if (parsed && (parsed.title || parsed.artist)) break
+        }catch(e){ console.warn('Meta fetch failed for', ep, e) }
+      }
+
+      if (!parsed){ return }
+      const key = `${parsed.artist}—${parsed.title}`
+      let changed = false
+      if (key !== lastSongKey){
+        lastSongKey = key
+        titleEl.textContent = parsed.title
+        artistEl.textContent = parsed.artist
+        await setCover(parsed)
+        changed = true
+      }
+      // schedule next poll adaptively: faster while playing, slower when idle
+      if (changed){
+        scheduleNext(1500)
+      } else {
+        scheduleNext(!audio.paused ? cfg.fastMs : cfg.refreshMs)
+      }
+      // metadata OK (silent)
+    }
+
+    async function setCover({artist, title}){
+      // Prefer dynamic template if available
+      if (cfg.coverTpl){
+        const url = cfg.coverTpl.replaceAll('{artist}', encodeURIComponent(artist)).replaceAll('{title}', encodeURIComponent(title))
+        return paintCover(url)
+      }
+      // Provider template comes before static provider cover if present
+      if (cfg.providerCoverTpl){
+        const url = cfg.providerCoverTpl.replaceAll('{artist}', encodeURIComponent(artist)).replaceAll('{title}', encodeURIComponent(title))
+        return paintCover(url)
+      }
+      // Try explicit provider cover first (e.g., 101.ru image URL)
+      if (cfg.providerCover){
+        return paintCover(cfg.providerCover)
+      }
+      if (cfg.cover){
+        // rcast artwork endpoint returns a text body containing the actual image URL.
+        // If it's already an image URL, paint it directly; otherwise resolve via smartGet.
+        const looksLikeImage = /\.(jpg|jpeg|png|webp|gif)(\?.*)?$/i.test(cfg.cover)
+        if (looksLikeImage){ return paintCover(cfg.cover) }
+        return resolveAndPaintCoverFromEndpoint(cfg.cover)
+      }
+      if (cfg.autoCover){
+        // On iOS/cellular in RU, Apple endpoints can be blocked; try MBZ/CAA first on iOS
+        const found = (
+          isIOS
+            ? (await tryMBZCover(artist, title) || await tryAppleCover(artist, title))
+            : (await tryAppleCover(artist, title) || await tryMBZCover(artist, title))
+        ) || await tryDeezerCover(artist, title)
+        if (found) return paintCover(found)
+      }
+      // fallback visual
+      const imgEl = document.getElementById('coverImg');
+      if (imgEl){ imgEl.src = cfg.defaultCover }
+    }
+
+    function normalizeQuery(s){
+      return (s||'').replace(/[“”"']/g,'').replace(/\s+/g,' ').trim()
+    }
+
+    async function tryDeezerCover(artist, title){
+      try{
+        const q = `artist:"${normalizeQuery(artist)}" track:"${normalizeQuery(title)}"`
+        const url = `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=1&_=${Date.now()}`
+        const r = await fetchWithTimeout(url, 6000)
+        if (!r.ok) return ''
+        const j = await r.json()
+        const item = j && j.data && j.data[0]
+        const img = item && (item.album?.cover_xl || item.album?.cover_big || item.album?.cover_medium)
+        return typeof img === 'string' ? img : ''
+      }catch{ return '' }
+    }
+
+    async function tryAppleCover(artist, title){
+      try{
+        const term = normalizeQuery(`${artist} ${title}`)
+        if (!term) return ''
+        const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&limit=1&_=${Date.now()}`
+        const r = await fetchWithTimeout(url, 6000)
+        if (!r.ok) return ''
+        const j = await r.json()
+        const it = j && j.results && j.results[0]
+        const base = it && (it.artworkUrl100 || it.artworkUrl60 || it.artworkUrl30)
+        if (!base || typeof base !== 'string') return ''
+        // Return the base URL; we'll try higher/lower size candidates when painting
+        return base
+      }catch{ return '' }
+    }
+
+    async function tryMBZCover(artist, title){
+      try{
+        const q = `artist:"${normalizeQuery(artist)}" recording:"${normalizeQuery(title)}"`
+        const url = `https://musicbrainz.org/ws/2/recording?query=${encodeURIComponent(q)}&fmt=json&limit=1&_=${Date.now()}`
+        const r = await fetchWithTimeout(url, 7000)
+        if (!r.ok) return ''
+        const j = await r.json()
+        const rec = j && j.recordings && j.recordings[0]
+        const rel = rec && rec.releases && rec.releases[0]
+        const mbid = rel && rel.id
+        if (!mbid) return ''
+        // CAA direct image; allow redirect by using the URL as img src later
+        return `https://coverartarchive.org/release/${mbid}/front`
+      }catch{ return '' }
+    }
+
+    function withCacheBuster(url){
+      try{
+        const u = new URL(url)
+        u.searchParams.set('_', Date.now().toString())
+        return u.toString()
+      }catch{ return url }
+    }
+
+    function itunesCandidates(base){
+      // base e.g. .../100x100bb.jpg; build variants in order of preference
+      const sizes = [600, 512, 400, 300, 200, 100, 60, 30]
+      const out = []
+      const m = base.match(/\/(\d+)x\d+bb\./)
+      if (m){
+        const ext = base.split(/bb\./).pop() // e.g. 'jpg'
+        for (const s of sizes){ out.push(base.replace(/\/(?:\d+)x(?:\d+)bb\.[^/]+$/, `/${s}x${s}bb.${ext}`)) }
+      }
+      // ensure base last
+      if (!out.includes(base)) out.push(base)
+      return out
+    }
+
+    async function paintCover(url){
+      const imgEl = document.getElementById('coverImg')
+      if (!imgEl) return
+      // Support trying multiple candidates (e.g., iTunes sizes)
+      const list = Array.isArray(url) ? url : (url.includes('mzstatic.com') ? itunesCandidates(url) : [url])
+      let i = 0
+      function tryNext(){
+        if (i >= list.length){ imgEl.src = cfg.defaultCover; return }
+        const busted = withCacheBuster(list[i++])
+        imgEl.onerror = tryNext
+        imgEl.src = busted
+      }
+      tryNext()
+    }
+
+    let lastCoverKey = ''
+    async function resolveAndPaintCoverFromEndpoint(endpoint){
+      // Only resolve once per song change to avoid rate limiting
+      if (lastCoverKey === lastSongKey){ return }
+      lastCoverKey = lastSongKey
+      const baseUrl = new URL(endpoint, location.href).toString()
+
+      const fetchVia = async (base, label) => {
+        const prox = base + encodeURIComponent(baseUrl)
+        console.info('[cover] via', label, prox)
+        const r = await fetchWithTimeout(prox, 9000)
+        if (!r.ok) throw new Error(label+': HTTP '+r.status)
+        const text = await r.text()
+        const urls = Array.from(text.matchAll(/https?:\/\/\S+/g)).map(m=>m[0].replace(/[\)"'<>\s].*$/,''))
+        const imgUrl = urls.find(u=>/\.(png|jpe?g|webp|gif)(\?.*)?$/i.test(u)) || urls.pop()
+        console.info('[cover] candidates', urls, 'chosen', imgUrl)
+        if (imgUrl) { await paintCover(imgUrl); return true }
+        return false
+      }
+
+      // Choose a single proxy path, keep it quiet on failures
+      try{
+        if (cfg.proxy){ if (await fetchVia(cfg.proxy, 'custom-proxy')) return }
+        if (await fetchVia('https://api.allorigins.win/raw?url=', 'allorigins')) return
+        // one quiet fallback
+        const jina = 'https://r.jina.ai/http://'
+        const prox = jina + baseUrl.replace(/^https?:\/\//,'')
+        console.info('[cover] via jina', prox)
+        const r = await fetchWithTimeout(prox, 9000)
+        const text = await r.text()
+        const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean)
+        const last = lines[lines.length-1] || ''
+        const urls = Array.from(text.matchAll(/https?:\/\/\S+/g)).map(m=>m[0].replace(/[\)"'<>\s].*$/,''))
+        if (last && /^https?:\/\//.test(last)) urls.push(last)
+        const imgUrl = urls.find(u=>/\.(png|jpe?g|webp|gif)(\?.*)?$/i.test(u)) || urls.pop()
+        console.info('[cover] jina chosen', imgUrl)
+        if (imgUrl){ await paintCover(imgUrl); return }
+      }catch(e){ console.warn('[cover] resolve failed', e) }
+      // keep previous cover on failure
+    }
+
+    // ---- boot ----
+    // kick off cover resolution immediately if a cover endpoint was provided
+    if (cfg.cover && !/\.(png|jpe?g|webp|gif)(\?.*)?$/i.test(cfg.cover)){
+      resolveAndPaintCoverFromEndpoint(cfg.cover)
+    }
+    updateMeta()
+
+    // ---- tiny tests (non-breaking, console only) ----
+    // production: no debug logs
+  })()
+  </script>
+  <script>
+  // Helper extracted to widen JSON compatibility for metadata endpoints
+  function extractTitleFromJson(json){
+    try{
+      // Common fields
+      const direct = json.title || json.song || json.streamtitle || json.nowplaying
+      if (typeof direct === 'string' && direct.trim()) return direct
+
+      // Icecast / Shoutcast style
+      const ice1 = json?.icestats?.source?.title
+      if (typeof ice1 === 'string' && ice1.trim()) return ice1
+
+      // Alternative popular schemas
+      const np1 = json?.now_playing?.song?.text || json?.now_playing?.song?.title
+      if (typeof np1 === 'string' && np1.trim()) return np1
+      const cur = json?.current?.title || json?.currentSong || json?.current_title
+      if (typeof cur === 'string' && cur.trim()) return cur
+      const meta = json?.metadata?.title || json?.meta?.title
+      if (typeof meta === 'string' && meta.trim()) return meta
+
+      // Try flatten known combos like "Artist - Title"
+      const artist = json?.artist || json?.now_playing?.song?.artist || json?.current?.artist
+      const title = json?.title || json?.now_playing?.song?.title || json?.current?.title
+      if (artist && title) return `${artist} - ${title}`
+    }catch(_){ /* noop */ }
+    return ''
+  }
+  </script>
+</body>
+</html>
