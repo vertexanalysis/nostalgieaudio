@@ -156,6 +156,8 @@
 
     // ---- networking ----
     let lastSongKey = ''
+    let lastCoverAttemptKey = ''
+    let lastCoverAttemptTs = 0
 
     async function fetchWithTimeout(url, ms=7000, init={}){
       const ctrl = new AbortController()
@@ -262,6 +264,18 @@
         await setCover(parsed)
         changed = true
       }
+      // If song hasn't changed but the cover is still the default, retry lookup occasionally (helps iOS/CDN lag)
+      else {
+        const imgEl = document.getElementById('coverImg')
+        const curSrcAttr = imgEl ? (imgEl.getAttribute('src') || '') : ''
+        const looksDefault = !curSrcAttr || curSrcAttr.indexOf(cfg.defaultCover) !== -1
+        const stale = Date.now() - lastCoverAttemptTs > 3000
+        if (cfg.autoCover && looksDefault && stale) {
+          lastCoverAttemptKey = lastSongKey
+          lastCoverAttemptTs = Date.now()
+          await setCover(parsed)
+        }
+      }
       // schedule next poll adaptively: faster while playing, slower when idle
       if (changed){
         scheduleNext(1500)
@@ -272,6 +286,8 @@
     }
 
     async function setCover({artist, title}){
+      lastCoverAttemptKey = lastSongKey
+      lastCoverAttemptTs = Date.now()
       // Prefer dynamic template if available
       if (cfg.coverTpl){
         const url = cfg.coverTpl.replaceAll('{artist}', encodeURIComponent(artist)).replaceAll('{title}', encodeURIComponent(title))
