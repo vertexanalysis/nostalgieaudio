@@ -248,7 +248,11 @@
         }catch(e){ console.warn('Meta fetch failed for', ep, e) }
       }
 
-      if (!parsed){ return }
+      if (!parsed){
+        // Ensure we continue polling even if a cycle yielded no parseable metadata
+        scheduleNext(cfg.refreshMs)
+        return
+      }
       const key = `${parsed.artist}—${parsed.title}`
       let changed = false
       if (key !== lastSongKey){
