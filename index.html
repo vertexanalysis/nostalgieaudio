@@ -13,12 +13,11 @@
     html,body{height:100%}
     body{
       margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Helvetica,Arial,sans-serif;
-      color:var(--text); background:var(--bg);
-      display:grid; place-items:center;
+      color:var(--text); background:transparent;
     }
     .player{
       display:flex; align-items:stretch; gap:0; position:relative;
-      width:min(840px, 96vw); border:1px solid #2a2a2a; border-radius:8px; overflow:hidden;
+      width:100%; border:1px solid #2a2a2a; border-radius:8px; overflow:hidden;
       background:#202224;
       box-shadow:0 6px 18px rgba(0,0,0,.35);
     }
@@ -323,17 +322,24 @@
 
     async function tryAppleCover(artist, title){
       try{
-        const term = normalizeQuery(`${artist} ${title}`)
-        if (!term) return ''
-        const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&limit=1&_=${Date.now()}`
-        const r = await fetchWithTimeout(url, 6000)
-        if (!r.ok) return ''
-        const j = await r.json()
-        const it = j && j.results && j.results[0]
-        const base = it && (it.artworkUrl100 || it.artworkUrl60 || it.artworkUrl30)
-        if (!base || typeof base !== 'string') return ''
-        // Return the base URL; we'll try higher/lower size candidates when painting
-        return base
+        const term1 = normalizeQuery(`${artist} ${title}`)
+        const term2 = normalizeQuery(`${title} ${artist}`)
+        if (!term1) return ''
+        const bases = [
+          `https://itunes.apple.com/search?term=${encodeURIComponent(term1)}&media=music&entity=song&country=ru&limit=1&_=${Date.now()}`,
+          `https://itunes.apple.com/search?term=${encodeURIComponent(term2)}&media=music&entity=song&country=ru&limit=1&_=${Date.now()}`,
+          `https://itunes.apple.com/search?term=${encodeURIComponent(term1)}&media=music&entity=album&limit=1&_=${Date.now()}`,
+          `https://itunes.apple.com/search?term=${encodeURIComponent(term1)}&media=music&entity=song&limit=1&_=${Date.now()}`
+        ]
+        for (const url of bases){
+          const r = await fetchWithTimeout(url, 7000)
+          if (!r.ok) continue
+          const j = await r.json()
+          const it = j && Array.isArray(j.results) && j.results[0]
+          const base = it && (it.artworkUrl100 || it.artworkUrl60 || it.artworkUrl30)
+          if (typeof base === 'string' && base) return base
+        }
+        return ''
       }catch{ return '' }
     }
 
