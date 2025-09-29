@@ -64,7 +64,7 @@
 <body>
   <div class="player" id="player">
     <div class="cover" id="cover">
-      <img id="coverImg" alt="Обложка"
+      <img id="coverImg" alt="Обложка" referrerpolicy="no-referrer" decoding="async"
         style="height:100%;width:auto;display:block;background:#0a0b11" />
       <div class="brand-watermark-cover">Nostalgie Махачкала</div>
     </div>
@@ -310,12 +310,9 @@
         return resolveAndPaintCoverFromEndpoint(cfg.cover)
       }
       if (cfg.autoCover){
-        // On iOS/cellular in RU, Apple endpoints can be blocked; try MBZ/CAA first on iOS
-        const found = (
-          isIOS
-            ? (await tryMBZCover(artist, title) || await tryAppleCover(artist, title))
-            : (await tryAppleCover(artist, title) || await tryMBZCover(artist, title))
-        ) || await tryDeezerCover(artist, title)
+        // Simplified strategy: always try Apple first (more accurate artwork).
+        // Regional blocks are handled by retry + size candidates and default fallback.
+        const found = await tryAppleCover(artist, title)
         if (found) return paintCover(found)
       }
       // fallback visual
@@ -404,16 +401,44 @@
     async function paintCover(url){
       const imgEl = document.getElementById('coverImg')
       if (!imgEl) return
-      // Support trying multiple candidates (e.g., iTunes sizes)
+      // Always show default first, then swap to a real image when/if it loads.
+      if (!imgEl.getAttribute('src')) imgEl.src = cfg.defaultCover
+
+      // Build candidate list (Apple sizes) if needed
       const list = Array.isArray(url) ? url : (url.includes('mzstatic.com') ? itunesCandidates(url) : [url])
+
       let i = 0
-      function tryNext(){
-        if (i >= list.length){ imgEl.src = cfg.defaultCover; return }
-        const busted = withCacheBuster(list[i++])
-        imgEl.onerror = tryNext
-        imgEl.src = busted
+      const perAttempt = isIOS ? 3500 : 5000
+
+      function nextCandidate(){
+        if (i >= list.length){
+          // Nothing worked — ensure default is shown
+          imgEl.src = cfg.defaultCover
+          return
+        }
+        const u = list[i++]
+        const test = new Image()
+        test.referrerPolicy = 'no-referrer'
+        test.decoding = 'async'
+        const timer = setTimeout(() => {
+          // Timeout hit — try next candidate
+          test.onload = test.onerror = null
+          nextCandidate()
+        }, perAttempt)
+        test.onload = () => {
+          clearTimeout(timer)
+          // On success, swap the visible image src to this candidate
+          imgEl.src = u
+        }
+        test.onerror = () => {
+          clearTimeout(timer)
+          nextCandidate()
+        }
+        // Avoid cache-busting on iOS entirely; otherwise only for non-Apple images
+        const finalUrl = (isIOS || u.includes('mzstatic.com')) ? u : withCacheBuster(u)
+        test.src = finalUrl
       }
-      tryNext()
+      nextCandidate()
     }
 
     let lastCoverKey = ''
@@ -454,7 +479,9 @@
         console.info('[cover] jina chosen', imgUrl)
         if (imgUrl){ await paintCover(imgUrl); return }
       }catch(e){ console.warn('[cover] resolve failed', e) }
-      // keep previous cover on failure
+      // Ensure default cover on failure
+      const imgEl = document.getElementById('coverImg')
+      if (imgEl) imgEl.src = cfg.defaultCover
     }
 
     // ---- boot ----
