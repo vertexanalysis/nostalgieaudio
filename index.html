@@ -385,75 +385,58 @@
         ]
 
         const fetchAppleJson = async (url) => {
-          // Always use proxy for file://, iOS, or HTTPS hosting to avoid CORS/403 errors
-          if (isIOS || location.protocol === 'file:' || location.protocol === 'https:') {
-            console.log('[DEBUG] Using proxy for Apple API (iOS, file://, or HTTPS hosting)')
+          // Always use proxy for iTunes API due to CORS restrictions
+          console.log('[DEBUG] Using proxy for Apple API (iTunes API requires proxy due to CORS)')
 
-            // Try AllOrigins first as it's more reliable for JSON
-            try {
-              const alloriginsProxy = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url)
-              console.log('[DEBUG] AllOrigins proxy URL:', alloriginsProxy)
-              const rp = await fetchWithTimeout(alloriginsProxy, 8000)
-              if (rp.ok) {
-                const json = await rp.json()
-                console.log('[DEBUG] AllOrigins proxy success')
-                return json
-              }
-              console.log('[DEBUG] AllOrigins proxy failed with status:', rp.status)
-            } catch (e) {
-              console.log('[DEBUG] AllOrigins proxy request failed:', e)
+          // Try AllOrigins first as it's more reliable for JSON
+          try {
+            const alloriginsProxy = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url)
+            console.log('[DEBUG] AllOrigins proxy URL:', alloriginsProxy)
+            const rp = await fetchWithTimeout(alloriginsProxy, 8000)
+            if (rp.ok) {
+              const json = await rp.json()
+              console.log('[DEBUG] AllOrigins proxy success')
+              return json
             }
+            console.log('[DEBUG] AllOrigins proxy failed with status:', rp.status)
+          } catch (e) {
+            console.log('[DEBUG] AllOrigins proxy request failed:', e)
+          }
 
-            // Fallback to Jina proxy
-            try {
-              const prox = 'https://r.jina.ai/http://' + url.replace(/^https?:\/\//, '')
-              console.log('[DEBUG] Jina proxy URL:', prox)
-              const rp = await fetchWithTimeout(prox, 10000)
-              if (!rp.ok) {
-                console.log('[DEBUG] Jina proxy failed with status:', rp.status)
-                return null
-              }
-              const text = await rp.text()
-              console.log('[DEBUG] Jina proxy response:', text.substring(0, 200) + '...')
-
-              // Extract JSON from jina's Markdown wrapper
-              const jsonMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/) || text.match(/\{[\s\S]*\}/)
-              const jsonText = jsonMatch ? jsonMatch[1] || jsonMatch[0] : text
-
-              try {
-                return JSON.parse(jsonText.trim())
-              } catch (e) {
-                console.log('[DEBUG] Jina proxy JSON parse failed:', e)
-                console.log('[DEBUG] Trying to parse raw text as JSON...')
-                try {
-                  return JSON.parse(text.trim())
-                } catch (e2) {
-                  console.log('[DEBUG] Raw text parse also failed:', e2)
-                  return null
-                }
-              }
-            } catch (e) {
-              console.log('[DEBUG] Jina proxy request failed:', e)
+          // Fallback to Jina proxy
+          try {
+            const prox = 'https://r.jina.ai/http://' + url.replace(/^https?:\/\//, '')
+            console.log('[DEBUG] Jina proxy URL:', prox)
+            const rp = await fetchWithTimeout(prox, 10000)
+            if (!rp.ok) {
+              console.log('[DEBUG] Jina proxy failed with status:', rp.status)
               return null
             }
+            const text = await rp.text()
+            console.log('[DEBUG] Jina proxy response:', text.substring(0, 200) + '...')
+
+            // Extract JSON from jina's Markdown wrapper
+            const jsonMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/) || text.match(/\{[\s\S]*\}/)
+            const jsonText = jsonMatch ? jsonMatch[1] || jsonMatch[0] : text
+
+            try {
+              return JSON.parse(jsonText.trim())
+            } catch (e) {
+              console.log('[DEBUG] Jina proxy JSON parse failed:', e)
+              console.log('[DEBUG] Trying to parse raw text as JSON...')
+              try {
+                return JSON.parse(text.trim())
+              } catch (e2) {
+                console.log('[DEBUG] Raw text parse also failed:', e2)
+                return null
+              }
+            }
+          } catch (e) {
+            console.log('[DEBUG] Jina proxy request failed:', e)
+            return null
           }
 
-          try {
-            const r = await fetchWithTimeout(url, 7000)
-            if (r.ok) return await r.json()
-          } catch (_) { /* fallthrough */ }
-          // file:// origin or blocked CORS — optional proxy fallback
-          if (cfg.appleProxy) {
-            try {
-              const prox = cfg.appleProxy.includes('r.jina.ai')
-                ? cfg.appleProxy + url.replace(/^https?:\/\//, '')
-                : cfg.appleProxy + encodeURIComponent(url)
-              const rp = await fetchWithTimeout(prox, 8000)
-              if (!rp.ok) return null
-              const text = await rp.text()
-              try { return JSON.parse(text) } catch { return null }
-            } catch (_) { return null }
-          }
+          // If both proxies fail, return null
           return null
         }
 
