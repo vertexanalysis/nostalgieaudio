@@ -94,7 +94,7 @@
     const params = new URLSearchParams(location.search)
     const cfg = {
       streamUrl: params.get('stream') || 'https://nostalgie.dagfm.ru/',
-      metaEndpoints: (params.get('meta') || 'https://status.rcast.net/71073,https://nostalgie.dagfm.ru/api/nowplaying,https://nostalgie.dagfm.ru/7.html')
+      metaEndpoints: (params.get('meta') || 'http://193.168.3.158:8000,https://status.rcast.net/71073,https://nostalgie.dagfm.ru/api/nowplaying,https://nostalgie.dagfm.ru/7.html')
         .split(',').map(s => s.trim()).filter(Boolean),
       // Prefer dynamic covers via coverTpl when provided; only use fixed cover if no template
       cover: params.get('cover') || '',
@@ -320,9 +320,8 @@
                     const raw = extractTitleFromJson(j)
                     parsed = splitTitle(typeof raw === 'string' ? raw : '')
                   } catch(_) {
-                    const mrc = text.match(/^(.*?)[\s\t]*[–-][\s\t]*(.+)$/m)
-                    const line = (mrc ? `${mrc[1]} - ${mrc[2]}` : (text.split(/\n|\r/).find(l => /[-–:]/.test(l)) || text)).trim()
-                    parsed = splitTitle(line)
+                    // Parse text-based metadata from different sources
+                    parsed = parseTextMetadata(text)
                   }
                 }
 
@@ -398,6 +397,96 @@
       return { title: s.trim(), artist: 'Radio Nostalgie' }
     }
 
+    function parseTextMetadata(text) {
+      console.log('[DEBUG] Parsing text metadata from:', text.substring(0, 200) + '...')
+
+      // Helper function to clean HTML tags and decode entities
+      function cleanHtmlText(str) {
+        // Remove HTML tags
+        let cleaned = str.replace(/<[^>]*>/g, ' ')
+        // Decode common HTML entities
+        cleaned = cleaned.replace(/&amp;/g, '&')
+                         .replace(/&lt;/g, '<')
+                         .replace(/&gt;/g, '>')
+                         .replace(/&quot;/g, '"')
+                         .replace(/&#39;/g, "'")
+                         .replace(/&nbsp;/g, ' ')
+        // Clean up extra whitespace
+        return cleaned.replace(/\s+/g, ' ').trim()
+      }
+
+      // Check for "Currently playing:" format first (direct server)
+      const currentlyPlayingMatch = text.match(/currently\s+playing:\s*(.+)/im)
+      if (currentlyPlayingMatch) {
+        const songTitle = cleanHtmlText(currentlyPlayingMatch[1])
+        console.log('[DEBUG] Found "Currently playing:" format:', songTitle)
+        return splitTitle(songTitle)
+      }
+
+      // Check for "Now playing:" format
+      const nowPlayingMatch = text.match(/now\s+playing:\s*(.+)/im)
+      if (nowPlayingMatch) {
+        const songTitle = cleanHtmlText(nowPlayingMatch[1])
+        console.log('[DEBUG] Found "Now playing:" format:', songTitle)
+        return splitTitle(songTitle)
+      }
+
+      // Check for streamstats class content (from your HTML structure)
+      const streamstatsMatch = text.match(/class=["']streamstats["'][^>]*>([^<]+)/i)
+      if (streamstatsMatch) {
+        const songTitle = cleanHtmlText(streamstatsMatch[1])
+        console.log('[DEBUG] Found streamstats format:', songTitle)
+        return splitTitle(songTitle)
+      }
+
+      // Look for content between any HTML tags that might contain song info
+      const tagContentMatches = text.match(/>([^<]+)</g)
+      if (tagContentMatches) {
+        for (const match of tagContentMatches) {
+          const content = cleanHtmlText(match.substring(1, match.length - 1))
+          // Skip if it's too short, looks like HTML, or contains common non-song words
+          if (content.length > 5 &&
+              !content.match(/^(html|head|body|div|table|tr|td|span|p)$/i) &&
+              !content.match(/^(stream|server|status|radio|live)$/i) &&
+              (content.includes(' ') || content.includes('-') || content.includes('–'))) {
+            console.log('[DEBUG] Found potential song in HTML tags:', content)
+            return splitTitle(content)
+          }
+        }
+      }
+
+      // RCast specific: prefer "Artist – Title" in any line
+      const mrc = text.match(/^(.*?)[\s\t]*[–-][\s\t]*(.+)$/m)
+      if (mrc) {
+        const line = cleanHtmlText(`${mrc[1]} - ${mrc[2]}`)
+        console.log('[DEBUG] Found RCast format:', line)
+        return splitTitle(line)
+      }
+
+      // Fallback: look for any line with separators
+      const lines = text.split(/\n|\r/)
+      for (const line of lines) {
+        const cleanLine = cleanHtmlText(line)
+        if (cleanLine.length > 5 && /[-–:]/.test(cleanLine) && !/<|>/.test(cleanLine)) {
+          console.log('[DEBUG] Found line with separator:', cleanLine)
+          return splitTitle(cleanLine)
+        }
+      }
+
+      // Last resort: use first substantial non-HTML line
+      for (const line of lines) {
+        const cleanLine = cleanHtmlText(line)
+        if (cleanLine.length > 3 && !/<|>/.test(cleanLine) &&
+            !cleanLine.match(/^(html|head|body|div|table|tr|td|span|p|script|style)$/i)) {
+          console.log('[DEBUG] Using first substantial line:', cleanLine)
+          return splitTitle(cleanLine)
+        }
+      }
+
+      console.log('[DEBUG] No parseable metadata found')
+      return null
+    }
+
     let metaTimerId = null
     function scheduleNext(ms){
       const delay = Math.max(500, ms|0)  // Allow polling as fast as 500ms
@@ -440,10 +529,8 @@
                 const raw = extractTitleFromJson(j)
                 parsed = splitTitle(typeof raw === 'string' ? raw : '')
               } catch(_) {
-                // RCast specific: prefer "Artist – Title" in any line
-                const mrc = text.match(/^(.*?)[\s\t]*[–-][\s\t]*(.+)$/m)
-                const line = (mrc ? `${mrc[1]} - ${mrc[2]}` : (text.split(/\n|\r/).find(l => /[-–:]/.test(l)) || text)).trim()
-                parsed = splitTitle(line)
+                // Parse text-based metadata from different sources
+                parsed = parseTextMetadata(text)
               }
             }
             console.log('[DEBUG] Parsed metadata:', parsed)
