@@ -71,7 +71,7 @@
     <div class="right">
       <div class="meta">
         <h1 class="title" id="title">Загрузка…</h1>
-        <p class="artist" id="artist">—</p>St
+        <p class="artist" id="artist">—</p>
       </div>
       <div class="controls">
         <button class="btn" id="playBtn" aria-label="Воспроизвести">
@@ -103,8 +103,8 @@
       providerCoverTpl: params.get('providerCoverTpl') || '',
       defaultCover: params.get('defaultCover') || 'nostalgielogo.jpeg',
       autoCover: params.get('autoCover') !== '0',
-      fastMs: Number(params.get('fastMs') || 2000),
-      refreshMs: Number(params.get('refreshMs') || 10000),
+      fastMs: Number(params.get('fastMs') || 4000),
+      refreshMs: Number(params.get('refreshMs') || 5000),
       // if empty, we'll auto-fallback to a public proxy (allorigins)
       proxy: params.get('proxy') || '',
       appleProxy: params.get('appleProxy') || ''
@@ -294,11 +294,13 @@
       }
       // schedule next poll adaptively: faster while playing, slower when idle
       if (changed){
-        scheduleNext(1500)
+        scheduleNext(1000)
       } else {
-        scheduleNext(!audio.paused ? cfg.fastMs : cfg.refreshMs)
+        // More frequent checks when playing to catch song changes quickly
+        const playingInterval = Math.min(cfg.fastMs, 3000)
+        scheduleNext(!audio.paused ? playingInterval : cfg.refreshMs)
       }
-      console.log('[DEBUG] updateMeta completed, next update in:', changed ? 1500 : (!audio.paused ? cfg.fastMs : cfg.refreshMs), 'ms')
+      console.log('[DEBUG] updateMeta completed, next update in:', changed ? 1000 : (!audio.paused ? Math.min(cfg.fastMs, 3000) : cfg.refreshMs), 'ms')
     }
 
     async function setCover({artist, title}){
