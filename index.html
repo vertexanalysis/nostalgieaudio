@@ -94,7 +94,7 @@
     const params = new URLSearchParams(location.search)
     const cfg = {
       streamUrl: params.get('stream') || 'https://nostalgie.dagfm.ru/',
-      metaEndpoints: (params.get('meta') || 'https://status.rcast.net/71073')
+      metaEndpoints: (params.get('meta') || 'https://status.rcast.net/71073,https://nostalgie.dagfm.ru/api/nowplaying,https://nostalgie.dagfm.ru/7.html')
         .split(',').map(s => s.trim()).filter(Boolean),
       // Prefer dynamic covers via coverTpl when provided; only use fixed cover if no template
       cover: params.get('cover') || '',
@@ -103,8 +103,8 @@
       providerCoverTpl: params.get('providerCoverTpl') || '',
       defaultCover: params.get('defaultCover') || 'nostalgielogo.jpeg',
       autoCover: params.get('autoCover') !== '0',
-      fastMs: Number(params.get('fastMs') || 4000),
-      refreshMs: Number(params.get('refreshMs') || 5000),
+      fastMs: Number(params.get('fastMs') || 1500),
+      refreshMs: Number(params.get('refreshMs') || 3000),
       // if empty, we'll auto-fallback to a public proxy (allorigins)
       proxy: params.get('proxy') || '',
       appleProxy: params.get('appleProxy') || ''
@@ -164,6 +164,15 @@
     const itunesCache = new Map()
     const CACHE_DURATION = 10 * 60 * 1000 // 10 minutes
 
+    // Metadata cache with shorter duration since songs change frequently
+    const metadataCache = new Map()
+    const METADATA_CACHE_DURATION = 15 * 1000 // 15 seconds - shorter for faster updates
+
+    // Continuous metadata fetching state
+    let continuousMetadataActive = false
+    let lastMetadataResult = null
+    let metadataFetchCount = 0
+
     async function fetchWithTimeout(url, ms=7000, init={}){
       const ctrl = new AbortController()
       const id = setTimeout(() => ctrl.abort(), ms)
@@ -172,6 +181,180 @@
     }
 
     function proxied(url){ return cfg.proxy ? `${cfg.proxy}${encodeURIComponent(url)}` : url }
+
+    // Robust metadata fetching with multiple proxy fallbacks (similar to iTunes API)
+    async function fetchMetadataRobust(url) {
+      // Check cache first (short duration since metadata changes frequently)
+      const cacheKey = url
+      const cached = metadataCache.get(cacheKey)
+      if (cached && Date.now() - cached.timestamp < METADATA_CACHE_DURATION) {
+        console.log('[DEBUG] Using cached metadata result')
+        return cached.data
+      }
+
+      // Add cache-buster to avoid intermediates
+      const u = new URL(url, location.href)
+      u.searchParams.set('_', Date.now().toString())
+      const finalUrl = u.toString()
+
+      // Multiple proxy services optimized for speed and reliability
+      const metadataProxyServices = [
+        {
+          name: 'Direct',
+          url: finalUrl,
+          timeout: 3000,  // Very fast timeout for direct
+          parseResponse: async (response) => ({
+            text: await response.text(),
+            contentType: (response.headers.get('content-type') || '').toLowerCase()
+          })
+        },
+        {
+          name: 'AllOrigins',
+          url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(finalUrl),
+          timeout: 4000,
+          parseResponse: async (response) => ({
+            text: await response.text(),
+            contentType: (response.headers.get('content-type') || '').toLowerCase()
+          })
+        },
+        {
+          name: 'Jina',
+          url: 'https://r.jina.ai/http://' + finalUrl.replace(/^https?:\/\//, ''),
+          timeout: 4000,
+          parseResponse: async (response) => {
+            const text = await response.text()
+            // For Jina, try to extract content from markdown wrapper
+            const contentMatch = text.match(/```(?:json|text)?\s*\n?([\s\S]*?)\n?```/)
+            const actualContent = contentMatch ? contentMatch[1] : text
+            return {
+              text: actualContent.trim(),
+              contentType: 'text/plain'  // Jina doesn't preserve headers
+            }
+          }
+        },
+        {
+          name: 'CORS-Anywhere',
+          url: 'https://cors-anywhere.herokuapp.com/' + finalUrl,
+          timeout: 4000,
+          parseResponse: async (response) => ({
+            text: await response.text(),
+            contentType: (response.headers.get('content-type') || '').toLowerCase()
+          })
+        }
+      ]
+
+      console.log('[DEBUG] Trying multiple proxy services for metadata:', finalUrl)
+
+      // Try each service with fast failover
+      for (const service of metadataProxyServices) {
+        try {
+          console.log(`[DEBUG] Trying ${service.name} for metadata:`, service.url)
+          const response = await fetchWithTimeout(service.url, service.timeout)
+
+          if (response.ok) {
+            const parsed = await service.parseResponse(response)
+            console.log(`[DEBUG] ${service.name} metadata success!`)
+            const result = {
+              res: {
+                ok: true,
+                status: response.status,
+                text: () => Promise.resolve(parsed.text),
+                json: () => {
+                  try {
+                    return Promise.resolve(JSON.parse(parsed.text))
+                  } catch (e) {
+                    return Promise.reject(new Error('Invalid JSON'))
+                  }
+                },
+                headers: {
+                  get: (name) => name.toLowerCase() === 'content-type' ? parsed.contentType : null
+                }
+              },
+              via: service.name.toLowerCase()
+            }
+            // Cache successful result
+            metadataCache.set(cacheKey, { data: result, timestamp: Date.now() })
+            return result
+          } else {
+            console.log(`[DEBUG] ${service.name} metadata failed with status:`, response.status)
+          }
+        } catch (e) {
+          console.log(`[DEBUG] ${service.name} metadata error:`, e.message)
+          // Continue to next service
+        }
+      }
+
+      console.log('[DEBUG] All metadata proxy services failed')
+      throw new Error('All metadata services failed')
+    }
+
+    // Continuous metadata fetching - runs in parallel to main loop
+    async function startContinuousMetadataFetching() {
+      if (continuousMetadataActive) return
+      continuousMetadataActive = true
+
+      console.log('[DEBUG] Starting continuous metadata fetching')
+
+      const fetchMetadataContinuously = async () => {
+        while (continuousMetadataActive) {
+          for (const ep of cfg.metaEndpoints) {
+            if (!continuousMetadataActive) break
+
+            try {
+              metadataFetchCount++
+              console.log(`[DEBUG] Continuous fetch #${metadataFetchCount} from:`, ep)
+
+              const {res, via} = await fetchMetadataRobust(ep)
+              if (res.ok) {
+                const ct = (res.headers.get('content-type') || '').toLowerCase()
+                let parsed = null
+
+                if (ct.includes('application/json')) {
+                  const json = await res.json()
+                  const raw = extractTitleFromJson(json)
+                  parsed = splitTitle(typeof raw === 'string' ? raw : '')
+                } else {
+                  const text = await res.text()
+                  try {
+                    const j = JSON.parse(text)
+                    const raw = extractTitleFromJson(j)
+                    parsed = splitTitle(typeof raw === 'string' ? raw : '')
+                  } catch(_) {
+                    const mrc = text.match(/^(.*?)[\s\t]*[–-][\s\t]*(.+)$/m)
+                    const line = (mrc ? `${mrc[1]} - ${mrc[2]}` : (text.split(/\n|\r/).find(l => /[-–:]/.test(l)) || text)).trim()
+                    parsed = splitTitle(line)
+                  }
+                }
+
+                if (parsed && (parsed.title || parsed.artist)) {
+                  lastMetadataResult = parsed
+                  console.log(`[DEBUG] Continuous metadata success via ${via}:`, parsed)
+                  // Short delay before next attempt
+                  await new Promise(resolve => setTimeout(resolve, 1000))
+                  break // Success, exit endpoint loop
+                }
+              }
+            } catch (e) {
+              console.log(`[DEBUG] Continuous metadata error:`, e.message)
+            }
+          }
+
+          // Very short delay between cycles - prioritize metadata!
+          await new Promise(resolve => setTimeout(resolve, 500))
+        }
+      }
+
+      // Start the continuous fetching
+      fetchMetadataContinuously().catch(e => {
+        console.error('[DEBUG] Continuous metadata fetching error:', e)
+        continuousMetadataActive = false
+      })
+    }
+
+    function stopContinuousMetadataFetching() {
+      console.log('[DEBUG] Stopping continuous metadata fetching')
+      continuousMetadataActive = false
+    }
 
     async function smartGet(url){
       // add cache-buster to avoid intermediates
@@ -217,51 +400,57 @@
 
     let metaTimerId = null
     function scheduleNext(ms){
-      const delay = Math.max(1000, ms|0)
+      const delay = Math.max(500, ms|0)  // Allow polling as fast as 500ms
       if (metaTimerId) clearTimeout(metaTimerId)
       metaTimerId = setTimeout(updateMeta, delay)
     }
 
     async function updateMeta(){
       console.log('[DEBUG] updateMeta called')
-      // no visible ticker in production
       let parsed = null
-      let lastVia = ''
 
-      for (const ep of cfg.metaEndpoints){
-        console.log('[DEBUG] Fetching metadata from:', ep)
-        try{
-          const {res, via} = await smartGet(proxied(ep))
-          lastVia = via
-          console.log('[DEBUG] Fetch successful via:', via, 'status:', res.status)
-          if (!res.ok) throw new Error('HTTP '+res.status)
-          const ct = (res.headers.get('content-type') || '').toLowerCase()
-          console.log('[DEBUG] Content-Type:', ct)
-          if (ct.includes('application/json')){
-            const json = await res.json()
-            console.log('[DEBUG] JSON response:', json)
-            const raw = extractTitleFromJson(json)
-            console.log('[DEBUG] Extracted title:', raw)
-            parsed = splitTitle(typeof raw === 'string' ? raw : '')
-          } else {
-            const text = await res.text()
-            console.log('[DEBUG] Text response:', text.substring(0, 200) + '...')
-            // attempt JSON first
-            try {
-              const j = JSON.parse(text)
-              const raw = extractTitleFromJson(j)
+      // First, check if we have fresh results from continuous fetching
+      if (lastMetadataResult) {
+        parsed = lastMetadataResult
+        console.log('[DEBUG] Using continuous metadata result:', parsed)
+      } else {
+        // Fallback to traditional fetching if continuous isn't working
+        console.log('[DEBUG] No continuous result available, trying traditional fetch')
+
+        for (const ep of cfg.metaEndpoints){
+          console.log('[DEBUG] Fetching metadata from:', ep)
+          try{
+            const {res, via} = await fetchMetadataRobust(ep)
+            console.log('[DEBUG] Fetch successful via:', via, 'status:', res.status)
+            if (!res.ok) throw new Error('HTTP '+res.status)
+            const ct = (res.headers.get('content-type') || '').toLowerCase()
+            console.log('[DEBUG] Content-Type:', ct)
+            if (ct.includes('application/json')){
+              const json = await res.json()
+              console.log('[DEBUG] JSON response:', json)
+              const raw = extractTitleFromJson(json)
+              console.log('[DEBUG] Extracted title:', raw)
               parsed = splitTitle(typeof raw === 'string' ? raw : '')
-            } catch(_) {
-              // RCast specific: prefer "Artist – Title" in any line
-              const mrc = text.match(/^(.*?)[\s\t]*[–-][\s\t]*(.+)$/m)
-              const line = (mrc ? `${mrc[1]} - ${mrc[2]}` : (text.split(/\n|\r/).find(l => /[-–:]/.test(l)) || text)).trim()
-              parsed = splitTitle(line)
+            } else {
+              const text = await res.text()
+              console.log('[DEBUG] Text response:', text.substring(0, 200) + '...')
+              // attempt JSON first
+              try {
+                const j = JSON.parse(text)
+                const raw = extractTitleFromJson(j)
+                parsed = splitTitle(typeof raw === 'string' ? raw : '')
+              } catch(_) {
+                // RCast specific: prefer "Artist – Title" in any line
+                const mrc = text.match(/^(.*?)[\s\t]*[–-][\s\t]*(.+)$/m)
+                const line = (mrc ? `${mrc[1]} - ${mrc[2]}` : (text.split(/\n|\r/).find(l => /[-–:]/.test(l)) || text)).trim()
+                parsed = splitTitle(line)
+              }
             }
+            console.log('[DEBUG] Parsed metadata:', parsed)
+            if (parsed && (parsed.title || parsed.artist)) break
+          } catch (e) {
+            console.warn('[DEBUG] Meta fetch failed for', ep, e)
           }
-          console.log('[DEBUG] Parsed metadata:', parsed)
-          if (parsed && (parsed.title || parsed.artist)) break
-        } catch (e) {
-          console.warn('[DEBUG] Meta fetch failed for', ep, e)
         }
       }
 
@@ -298,13 +487,13 @@
       }
       // schedule next poll adaptively: faster while playing, slower when idle
       if (changed){
-        scheduleNext(1000)
+        scheduleNext(500)  // Very fast follow-up after song change
       } else {
         // More frequent checks when playing to catch song changes quickly
-        const playingInterval = Math.min(cfg.fastMs, 3000)
+        const playingInterval = Math.min(cfg.fastMs, 1500)  // Cap at 1.5 seconds max
         scheduleNext(!audio.paused ? playingInterval : cfg.refreshMs)
       }
-      console.log('[DEBUG] updateMeta completed, next update in:', changed ? 1000 : (!audio.paused ? Math.min(cfg.fastMs, 3000) : cfg.refreshMs), 'ms')
+      console.log('[DEBUG] updateMeta completed, next update in:', changed ? 500 : (!audio.paused ? Math.min(cfg.fastMs, 1500) : cfg.refreshMs), 'ms')
     }
 
     async function setCover({artist, title}){
@@ -397,24 +586,18 @@
             return cached.data
           }
 
-          // Multiple proxy services to avoid rate limiting issues
+          // Multiple proxy services optimized for speed (especially from Russia)
           const proxyServices = [
             {
               name: 'AllOrigins',
               url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
-              timeout: 6000,
-              parseJson: (response) => response.json()
-            },
-            {
-              name: 'CORS-Anywhere',
-              url: 'https://cors-anywhere.herokuapp.com/' + url,
-              timeout: 6000,
+              timeout: 4000,  // Faster timeout
               parseJson: (response) => response.json()
             },
             {
               name: 'Jina',
               url: 'https://r.jina.ai/http://' + url.replace(/^https?:\/\//, ''),
-              timeout: 8000,
+              timeout: 4000,  // Faster timeout
               parseJson: async (response) => {
                 const text = await response.text()
                 // Extract JSON from jina's Markdown wrapper
@@ -424,9 +607,15 @@
               }
             },
             {
+              name: 'CORS-Anywhere',
+              url: 'https://cors-anywhere.herokuapp.com/' + url,
+              timeout: 4000,  // Faster timeout
+              parseJson: (response) => response.json()
+            },
+            {
               name: 'ProxyNova',
               url: 'https://api.proxynova.com/cgi-bin/proxy.cgi?u=' + encodeURIComponent(url),
-              timeout: 6000,
+              timeout: 4000,  // Faster timeout
               parseJson: (response) => response.json()
             }
           ]
@@ -529,7 +718,7 @@
       const list = Array.isArray(url) ? url : (url.includes('mzstatic.com') ? itunesCandidates(url) : [url])
 
       let i = 0
-      const perAttempt = isIOS ? 8000 : 5000
+      const perAttempt = isIOS ? 4000 : 3000  // Much faster image loading timeouts
 
       function nextCandidate(){
         if (i >= list.length){
@@ -633,6 +822,9 @@
       console.log('[DEBUG] Resolving cover from endpoint:', cfg.cover)
       resolveAndPaintCoverFromEndpoint(cfg.cover)
     }
+
+    console.log('[DEBUG] Starting continuous metadata fetching')
+    startContinuousMetadataFetching()
 
     console.log('[DEBUG] Starting metadata update')
     updateMeta()
