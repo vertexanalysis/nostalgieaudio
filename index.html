@@ -160,6 +160,10 @@
     let lastCoverAttemptKey = ''
     let lastCoverAttemptTs = 0
 
+    // Simple cache for iTunes API results to avoid rate limiting
+    const itunesCache = new Map()
+    const CACHE_DURATION = 10 * 60 * 1000 // 10 minutes
+
     async function fetchWithTimeout(url, ms=7000, init={}){
       const ctrl = new AbortController()
       const id = setTimeout(() => ctrl.abort(), ms)
@@ -385,58 +389,75 @@
         ]
 
         const fetchAppleJson = async (url) => {
-          // Always use proxy for iTunes API due to CORS restrictions
-          console.log('[DEBUG] Using proxy for Apple API (iTunes API requires proxy due to CORS)')
-
-          // Try AllOrigins first as it's more reliable for JSON
-          try {
-            const alloriginsProxy = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url)
-            console.log('[DEBUG] AllOrigins proxy URL:', alloriginsProxy)
-            const rp = await fetchWithTimeout(alloriginsProxy, 8000)
-            if (rp.ok) {
-              const json = await rp.json()
-              console.log('[DEBUG] AllOrigins proxy success')
-              return json
-            }
-            console.log('[DEBUG] AllOrigins proxy failed with status:', rp.status)
-          } catch (e) {
-            console.log('[DEBUG] AllOrigins proxy request failed:', e)
+          // Check cache first to avoid unnecessary API calls
+          const cacheKey = url
+          const cached = itunesCache.get(cacheKey)
+          if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+            console.log('[DEBUG] Using cached iTunes result')
+            return cached.data
           }
 
-          // Fallback to Jina proxy
-          try {
-            const prox = 'https://r.jina.ai/http://' + url.replace(/^https?:\/\//, '')
-            console.log('[DEBUG] Jina proxy URL:', prox)
-            const rp = await fetchWithTimeout(prox, 10000)
-            if (!rp.ok) {
-              console.log('[DEBUG] Jina proxy failed with status:', rp.status)
-              return null
-            }
-            const text = await rp.text()
-            console.log('[DEBUG] Jina proxy response:', text.substring(0, 200) + '...')
-
-            // Extract JSON from jina's Markdown wrapper
-            const jsonMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/) || text.match(/\{[\s\S]*\}/)
-            const jsonText = jsonMatch ? jsonMatch[1] || jsonMatch[0] : text
-
-            try {
-              return JSON.parse(jsonText.trim())
-            } catch (e) {
-              console.log('[DEBUG] Jina proxy JSON parse failed:', e)
-              console.log('[DEBUG] Trying to parse raw text as JSON...')
-              try {
-                return JSON.parse(text.trim())
-              } catch (e2) {
-                console.log('[DEBUG] Raw text parse also failed:', e2)
-                return null
+          // Multiple proxy services to avoid rate limiting issues
+          const proxyServices = [
+            {
+              name: 'AllOrigins',
+              url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+              timeout: 6000,
+              parseJson: (response) => response.json()
+            },
+            {
+              name: 'CORS-Anywhere',
+              url: 'https://cors-anywhere.herokuapp.com/' + url,
+              timeout: 6000,
+              parseJson: (response) => response.json()
+            },
+            {
+              name: 'Jina',
+              url: 'https://r.jina.ai/http://' + url.replace(/^https?:\/\//, ''),
+              timeout: 8000,
+              parseJson: async (response) => {
+                const text = await response.text()
+                // Extract JSON from jina's Markdown wrapper
+                const jsonMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/) || text.match(/\{[\s\S]*\}/)
+                const jsonText = jsonMatch ? jsonMatch[1] || jsonMatch[0] : text
+                return JSON.parse(jsonText.trim())
               }
+            },
+            {
+              name: 'ProxyNova',
+              url: 'https://api.proxynova.com/cgi-bin/proxy.cgi?u=' + encodeURIComponent(url),
+              timeout: 6000,
+              parseJson: (response) => response.json()
             }
-          } catch (e) {
-            console.log('[DEBUG] Jina proxy request failed:', e)
-            return null
+          ]
+
+          console.log('[DEBUG] Trying multiple proxy services for iTunes API:', url)
+
+          // Try each proxy service with shorter timeouts to fail fast
+          for (const service of proxyServices) {
+            try {
+              console.log(`[DEBUG] Trying ${service.name} proxy:`, service.url)
+              const response = await fetchWithTimeout(service.url, service.timeout)
+
+              if (response.ok) {
+                const json = await service.parseJson(response)
+                if (json && json.results) {
+                  console.log(`[DEBUG] ${service.name} proxy success!`)
+                  // Cache successful result
+                  itunesCache.set(cacheKey, { data: json, timestamp: Date.now() })
+                  return json
+                }
+                console.log(`[DEBUG] ${service.name} returned data but no results`)
+              } else {
+                console.log(`[DEBUG] ${service.name} proxy failed with status:`, response.status)
+              }
+            } catch (e) {
+              console.log(`[DEBUG] ${service.name} proxy error:`, e.message)
+              // Continue to next service
+            }
           }
 
-          // If both proxies fail, return null
+          console.log('[DEBUG] All proxy services failed for iTunes API')
           return null
         }
 
