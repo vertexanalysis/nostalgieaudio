@@ -561,12 +561,12 @@
         const isAd = artistLower === 'jingle' || artistLower === 'reklama'
 
         if (isAd) {
-          // Display advertisement contact info
-          titleEl.textContent = parsed.title
-          artistEl.innerHTML = `${parsed.artist} • <span style="color: #ff7a59;">Реклама на радио 8(988) 293-50-25</span>`
-          console.log('[DEBUG] Detected jingle/reklama, displaying ad contact')
+          // Display advertisement contact info in title area instead of song title
+          titleEl.innerHTML = '<span style="color: #ff7a59;">Реклама на радио 8(988) 293-50-25</span>'
+          artistEl.textContent = parsed.artist
+          console.log('[DEBUG] Detected jingle/reklama, displaying ad contact in title')
         } else {
-        // Normal song display
+          // Normal song display
           titleEl.textContent = parsed.title
           artistEl.textContent = parsed.artist
         }
