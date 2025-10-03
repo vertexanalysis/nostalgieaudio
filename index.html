@@ -39,7 +39,7 @@
     .right{ flex:1; display:flex; flex-direction:column; justify-content:center; min-height:160px; padding:12px 18px }
     .meta{flex:0 0 auto; margin-bottom:8px}
     .title{font-weight:700; font-size:26px; line-height:1.2; margin:0 0 4px}
-    .artist{margin:0; font-size:16px; color:#b9bed0}
+    .artist{margin:0; font-size:16px; color:#b9bed0; line-height:1.4; word-wrap:break-word; overflow-wrap:break-word}
 
     .controls{display:flex; align-items:center; gap:12px; margin-top:6px}
     .btn{appearance:none; border:none; cursor:pointer; display:inline-grid; place-items:center; width:64px;height:64px;border-radius:50%; background:#e35a1d; color:#fff}
@@ -58,6 +58,8 @@
     @media (max-width: 560px){
       .brand-watermark{ display:none }
       .brand-watermark-cover{ display:block }
+      .title{ font-size:20px }
+      .artist{ font-size:14px; line-height:1.5 }
     }
   </style>
 </head>
@@ -553,8 +555,22 @@
       if (key !== lastSongKey){
         console.log('[DEBUG] Song changed! Updating UI and cover')
         lastSongKey = key
-        titleEl.textContent = parsed.title
-        artistEl.textContent = parsed.artist
+
+        // Check if artist is jingle or reklama (case-insensitive)
+        const artistLower = (parsed.artist || '').toLowerCase()
+        const isAd = artistLower === 'jingle' || artistLower === 'reklama'
+
+        if (isAd) {
+          // Display advertisement contact info
+          titleEl.textContent = parsed.title
+          artistEl.innerHTML = `${parsed.artist} • <span style="color: #ff7a59;">Реклама на радио 8(988) 293-50-25</span>`
+          console.log('[DEBUG] Detected jingle/reklama, displaying ad contact')
+        } else {
+        // Normal song display
+          titleEl.textContent = parsed.title
+          artistEl.textContent = parsed.artist
+        }
+
         await setCover(parsed)
         changed = true
       }
@@ -948,5 +964,8 @@
     return ''
   }
   </script>
+  <script defer src="https://static.cloudflareinsights.com/beacon.min.js"
+    data-cf-beacon='{"token":"53e240a7a36248fc8b15db80cebfd568"}'>
+    </script>
 </body>
 </html>
