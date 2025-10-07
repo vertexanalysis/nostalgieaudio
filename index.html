@@ -174,6 +174,8 @@
     let continuousMetadataActive = false
     let lastMetadataResult = null
     let metadataFetchCount = 0
+    let useRCastForPolling = false  // Track if we should use RCast instead of Icecast
+    let lastIcecastResult = null    // Monitor Icecast for song changes even when using RCast
 
     async function fetchWithTimeout(url, ms=7000, init={}){
       const ctrl = new AbortController()
@@ -299,12 +301,62 @@
 
       const fetchMetadataContinuously = async () => {
         while (continuousMetadataActive) {
-          for (const ep of cfg.metaEndpoints) {
+          // Determine which endpoints to use based on current mode
+          let endpointsToUse
+
+          if (useRCastForPolling) {
+            // When using RCast for current song, poll RCast for display
+            // but also check Icecast to detect song changes
+            const rcastEndpoints = cfg.metaEndpoints.filter(ep =>
+              ep.includes('rcast.net') || ep.includes('status.rcast')
+            )
+            const icecastEndpoint = cfg.metaEndpoints.find(ep =>
+              ep.includes('193.168.3.158')
+            )
+
+            endpointsToUse = rcastEndpoints
+
+            // Also fetch from Icecast in background to detect song changes
+            if (icecastEndpoint) {
+              try {
+                const {res, via} = await fetchMetadataRobust(icecastEndpoint)
+                if (res.ok) {
+                  const ct = (res.headers.get('content-type') || '').toLowerCase()
+                  let icecastParsed = null
+
+                  if (ct.includes('application/json')) {
+                    const json = await res.json()
+                    const raw = extractTitleFromJson(json)
+                    icecastParsed = splitTitle(typeof raw === 'string' ? raw : '')
+                  } else {
+                    const text = await res.text()
+                    try {
+                      const j = JSON.parse(text)
+                      const raw = extractTitleFromJson(j)
+                      icecastParsed = splitTitle(typeof raw === 'string' ? raw : '')
+                    } catch(_) {
+                      icecastParsed = parseTextMetadata(text)
+                    }
+                  }
+
+                  lastIcecastResult = icecastParsed
+                  console.log('[DEBUG] Background Icecast check for song change:', icecastParsed)
+                }
+              } catch (e) {
+                console.log('[DEBUG] Background Icecast check failed:', e.message)
+              }
+            }
+          } else {
+            // Default: use all endpoints starting with Icecast
+            endpointsToUse = cfg.metaEndpoints
+          }
+
+          for (const ep of endpointsToUse) {
             if (!continuousMetadataActive) break
 
             try {
               metadataFetchCount++
-              console.log(`[DEBUG] Continuous fetch #${metadataFetchCount} from:`, ep)
+              console.log(`[DEBUG] Continuous fetch #${metadataFetchCount} from:`, ep, useRCastForPolling ? '(RCast mode)' : '(Icecast mode)')
 
               const {res, via} = await fetchMetadataRobust(ep)
               if (res.ok) {
@@ -397,6 +449,93 @@
       const p2 = s.split(/\s:\s/)
       if (p2.length >= 2) return { artist: p2[0].trim(), title: p2.slice(1).join(': ').trim() }
       return { title: s.trim(), artist: 'Radio Nostalgie' }
+    }
+
+    // Detect mojibake/gibberish (common encoding issue with Cyrillic text from Icecast)
+    function isMojibake(text) {
+      if (!text || text.length === 0) return false
+
+      // Common mojibake patterns for Cyrillic encoded as Latin-1/Windows-1252
+      const mojibakePatterns = [
+        /[ÐÑÒÓÔÕ]{3,}/,  // Common Cyrillic mojibake sequences
+        /Ð[°±²³´µ¶·¸¹]{2,}/,  // Cyrillic letters incorrectly decoded
+        /Ñ[€‚ƒ„…†‡ˆ‰Š‹ŒŽ''""•–—˜™š›œžŸ]{2,}/,
+        /[ÐÑÒ][†‡ˆ‰Š‹ŒŽ]{2,}/,
+        /â€[˜™šœž]/,  // UTF-8 mojibake
+        /Ã[\x80-\xBF]{2,}/,  // Another UTF-8 mojibake pattern (fixed range)
+        /\?{3,}/,  // Multiple question marks (encoding failure)
+        /â„–/  // Common № symbol mojibake
+      ]
+
+      for (const pattern of mojibakePatterns) {
+        if (pattern.test(text)) {
+          console.log('[DEBUG] Mojibake detected with pattern:', pattern, 'in text:', text.substring(0, 50))
+          return true
+        }
+      }
+
+      // Check for excessive non-printable or weird characters
+      const weirdCharCount = (text.match(/[^\x20-\x7E\u0400-\u04FF\u0500-\u052F]/g) || []).length
+      const weirdRatio = weirdCharCount / text.length
+      if (weirdRatio > 0.3) {
+        console.log('[DEBUG] High ratio of weird characters:', weirdRatio, 'in text:', text.substring(0, 50))
+        return true
+      }
+
+      return false
+    }
+
+    // Fetch clean metadata from RCast when Icecast returns mojibake
+    async function fetchCleanMetadataFromRCast() {
+      console.log('[DEBUG] Fetching clean metadata from RCast due to mojibake')
+
+      // Try RCast endpoint specifically (skip Icecast)
+      const rcastEndpoints = cfg.metaEndpoints.filter(ep =>
+        ep.includes('rcast.net') || ep.includes('status.rcast')
+      )
+
+      for (const ep of rcastEndpoints) {
+        try {
+          console.log('[DEBUG] Trying RCast endpoint for clean metadata:', ep)
+          const {res, via} = await fetchMetadataRobust(ep)
+
+          if (res.ok) {
+            const ct = (res.headers.get('content-type') || '').toLowerCase()
+            let parsed = null
+
+            if (ct.includes('application/json')) {
+              const json = await res.json()
+              const raw = extractTitleFromJson(json)
+              parsed = splitTitle(typeof raw === 'string' ? raw : '')
+            } else {
+              const text = await res.text()
+              try {
+                const j = JSON.parse(text)
+                const raw = extractTitleFromJson(j)
+                parsed = splitTitle(typeof raw === 'string' ? raw : '')
+              } catch(_) {
+                parsed = parseTextMetadata(text)
+              }
+            }
+
+            if (parsed && (parsed.title || parsed.artist)) {
+              // Verify this isn't also mojibake
+              const combinedText = `${parsed.artist} ${parsed.title}`
+              if (!isMojibake(combinedText)) {
+                console.log('[DEBUG] Got clean metadata from RCast:', parsed)
+                return parsed
+              } else {
+                console.log('[DEBUG] RCast also returned mojibake, trying next endpoint')
+              }
+            }
+          }
+        } catch (e) {
+          console.log('[DEBUG] RCast fetch failed:', e.message)
+        }
+      }
+
+      console.log('[DEBUG] Could not fetch clean metadata from RCast')
+      return null
     }
 
     function parseTextMetadata(text) {
@@ -555,6 +694,31 @@
       if (key !== lastSongKey){
         console.log('[DEBUG] Song changed! Updating UI and cover')
         lastSongKey = key
+
+        // Check for mojibake in metadata (Cyrillic encoding issue from Icecast)
+        const combinedText = `${parsed.artist} ${parsed.title}`
+        const hasMojibake = isMojibake(combinedText)
+
+        if (hasMojibake) {
+          console.log('[DEBUG] Mojibake detected in metadata, switching to RCast polling')
+          const cleanMetadata = await fetchCleanMetadataFromRCast()
+          if (cleanMetadata) {
+            // Replace mojibake with clean metadata
+            parsed = cleanMetadata
+            // Switch continuous polling to RCast for this song
+            useRCastForPolling = true
+            console.log('[DEBUG] Replaced mojibake with clean metadata and switched to RCast polling:', parsed)
+          } else {
+            console.log('[DEBUG] Could not get clean metadata, using mojibake data')
+            useRCastForPolling = false
+          }
+        } else {
+          // Clean metadata from Icecast, switch back to Icecast polling
+          if (useRCastForPolling) {
+            console.log('[DEBUG] Clean metadata detected, switching back to Icecast polling')
+          }
+          useRCastForPolling = false
+        }
 
         // Check if artist is jingle or reklama (case-insensitive)
         const artistLower = (parsed.artist || '').toLowerCase()
