@@ -467,6 +467,8 @@
         /â„–/  // Common № symbol mojibake
       ]
 
+      // Check each pattern - even ONE match means we need RCast
+      // This catches mixed cases like "Sia feat. ÐÑÑÐ°Ñ‡Ð°" where Latin is ok but Cyrillic is broken
       for (const pattern of mojibakePatterns) {
         if (pattern.test(text)) {
           console.log('[DEBUG] Mojibake detected with pattern:', pattern, 'in text:', text.substring(0, 50))
@@ -474,11 +476,13 @@
         }
       }
 
-      // Check for excessive non-printable or weird characters
+      // Check for weird characters ratio
+      // Lower threshold (0.15 instead of 0.3) to catch partial mojibake in mixed text
       const weirdCharCount = (text.match(/[^\x20-\x7E\u0400-\u04FF\u0500-\u052F]/g) || []).length
       const weirdRatio = weirdCharCount / text.length
-      if (weirdRatio > 0.3) {
-        console.log('[DEBUG] High ratio of weird characters:', weirdRatio, 'in text:', text.substring(0, 50))
+
+      if (weirdRatio > 0.15 && weirdCharCount > 3) {
+        console.log('[DEBUG] High ratio of weird characters:', weirdRatio, '(' + weirdCharCount + ' chars) in text:', text.substring(0, 50))
         return true
       }
 
